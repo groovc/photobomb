@@ -1,0 +1,51 @@
+This is a mobile-first web application that lets a user take a photo and then generate a version with one additional person added to the scene.
+
+Product constraints:
+- The primary target is typical mobile browsers with camera access. Desktop support is optional and can be treated as a fallback experience later.
+- The app should rely on standard web capabilities that are commonly available on modern mobile browsers.
+- The app should be implemented as a Progressive Web App (PWA) to provide a more app-like, installable mobile experience.
+- The PWA should cache static assets for faster repeat visits and basic offline shell loading.
+- PWA support is a UX and performance enhancement, not a requirement for core camera, save, or AI functionality.
+- Camera access should use normal browser camera permissions.
+- Saving should use standard browser behavior: download the final image file, and allow the user to save it to their gallery/photos app from there if their device/browser supports that flow.
+- The app should use native web technologies where practical and pull in libraries only when they materially simplify camera, storage, or image handling.
+
+Core UI:
+- A simple, modern camera screen with a live viewfinder, capture button, and camera switcher when the device exposes both front and rear cameras.
+- A review screen after capture.
+- A picker for choosing one person to add to the captured photo.
+- A result screen showing the generated final image with options to save or start over.
+
+People assets:
+- The list of people should be configurable locally by the user.
+- Users can upload their own person images or use bundled pre-defined people.
+- Pre-defined people assets should be PNG files.
+- User-added assets and settings should be stored locally in IndexedDB.
+- Uploaded person images should go through background removal automatically when possible before they are shown in the picker.
+- If background removal fails, the app should reject the upload or clearly mark it as unusable rather than sending a bad asset into generation.
+
+Flow:
+1. User opens the app.
+2. User is prompted for camera permission.
+3. If camera permission is granted, the user is taken to the camera screen.
+4. If camera permission is denied or unavailable, the app should show a clear error state and a way to retry.
+5. User captures a photo.
+6. User is taken to a review screen where they can continue or start over.
+7. User selects one person to add to the photo.
+8. The app sends the captured image and selected person asset to the AI augmentation step.
+9. User is taken to the result screen when augmentation succeeds.
+10. If the user does not like the result, or augmentation fails, times out, or returns an unusable image, they can start over from the beginning.
+11. User saves the final image by downloading a high-quality JPEG.
+
+AI behavior:
+- Use a server-side API by default for best quality.
+- Optionally evaluate local in-browser models later, but local inference is not required for the first version.
+- The model should add exactly one extra person to the scene.
+- The added person should be placed in a natural way that matches the original photo's lighting and perspective as closely as possible.
+- The model should not alter existing people, the background, the framing, or facial identity.
+- The output should be one-tap only; there are no manual placement or editing tools in the first version.
+- The augmentation step may take a long time on a mobile connection, but if it exceeds 5 minutes it should be treated as failed.
+
+Output:
+- Save only the final augmented image, not the original capture.
+- Output format should be high-quality JPEG.
