@@ -33,10 +33,41 @@ export async function stopCamera() {
 }
 
 export async function capturePhoto(videoEl, canvasEl) {
-  canvasEl.width = videoEl.videoWidth;
-  canvasEl.height = videoEl.videoHeight;
+  const vw = videoEl.videoWidth;
+  const vh = videoEl.videoHeight;
+
+  // On some mobile browsers (notably iOS Safari) the camera always returns
+  // landscape-oriented pixels regardless of how the device is held. Detect
+  // this by comparing the video's aspect ratio with the screen orientation
+  // and rotate the canvas capture to match what the user actually sees.
+  //
+  // Use orientation type rather than angle: angle=0 means the device's
+  // *natural* orientation, which is landscape on desktop monitors and portrait
+  // on phones — so angle alone can't distinguish the two cases.
+  const orientationType = screen.orientation?.type ?? '';
+  const screenPortrait = orientationType.startsWith('portrait') ||
+    (!orientationType && window.innerHeight >= window.innerWidth);
+  const videoPortrait = vh >= vw;
+
   const ctx = canvasEl.getContext('2d');
-  ctx.drawImage(videoEl, 0, 0);
+
+  if (screenPortrait !== videoPortrait) {
+    // Mismatch: rotate the capture so the image aligns with screen orientation.
+    // Swap canvas dimensions (portrait ↔ landscape) and apply a ±90° rotation.
+    canvasEl.width = vh;
+    canvasEl.height = vw;
+    ctx.save();
+    ctx.translate(vh / 2, vw / 2);
+    const screenAngle = ((screen.orientation?.angle ?? (typeof window.orientation === 'number' ? window.orientation : 0)) + 360) % 360;
+    const rotDeg = (screenAngle === 0 || screenAngle === 270) ? -90 : 90;
+    ctx.rotate(rotDeg * Math.PI / 180);
+    ctx.drawImage(videoEl, -vw / 2, -vh / 2);
+    ctx.restore();
+  } else {
+    canvasEl.width = vw;
+    canvasEl.height = vh;
+    ctx.drawImage(videoEl, 0, 0);
+  }
 
   return new Promise((resolve, reject) => {
     canvasEl.toBlob(

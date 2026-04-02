@@ -215,6 +215,20 @@ function reset() {
 
 async function init() {
   setupListeners();
+
+  // Restart the camera when the device rotates so the stream aspect ratio
+  // matches the new viewport (avoids over-cropped / zoomed-in viewfinder).
+  const onOrientationChange = () => {
+    if (!document.getElementById('screen-camera').classList.contains('hidden')) {
+      startCamera();
+    }
+  };
+  if (screen.orientation) {
+    screen.orientation.addEventListener('change', onOrientationChange);
+  } else {
+    window.addEventListener('orientationchange', onOrientationChange);
+  }
+
   await startCamera();
 }
 

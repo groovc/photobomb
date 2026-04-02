@@ -1,6 +1,6 @@
 export const KEY_STORAGE = 'openai_api_key';
-const FACE_DETECTION_FLAG = 'feature_face_detection';
-const FACE_TO_BODY_RATIO = 7;
+const SMART_PLACEMENT_FLAG = 'feature_face_detection'; // key kept for backwards compat
+const FACE_TO_BODY_RATIO = 7; // used only when pose detection falls back to face
 const DEFAULT_CONTENT_HEIGHT_RATIO = 0.40;
 const MIN_CONTENT_HEIGHT_RATIO = 0.34;
 const MAX_CONTENT_HEIGHT_RATIO = 0.72;
@@ -21,11 +21,11 @@ export const getApiKey = () => localStorage.getItem(KEY_STORAGE);
 export const saveApiKey = (key) => localStorage.setItem(KEY_STORAGE, key.trim());
 export const clearApiKey = () => localStorage.removeItem(KEY_STORAGE);
 
-function isFaceDetectionEnabled() {
+function isSmartPlacementEnabled() {
   const params = new URLSearchParams(window.location.search);
   if (params.get('faceDetection') === '0') return false;
   if (params.get('faceDetection') === '1') return true;
-  return localStorage.getItem(FACE_DETECTION_FLAG) !== '0';
+  return localStorage.getItem(SMART_PLACEMENT_FLAG) !== '0';
 }
 
 // ── Person image analysis ──────────────────────────────────────────────────────
@@ -123,17 +123,18 @@ function rectIntersectionArea(a, b) {
   return (right - left) * (bottom - top);
 }
 
-function buildFaceKeepOutZones(photoW, photoH, face) {
-  if (!face) return [];
+function buildKeepOutZones(photoW, photoH, subject) {
+  if (!subject) return [];
 
-  const width = face.width;
-  const height = face.height;
+  const { left, top, right, bottom } = subject.keepOut;
+  const w = right - left;
+  const h = bottom - top;
 
   return [{
-    left: Math.max(0, face.x - (width * FACE_KEEP_OUT_SIDE_PADDING_RATIO)),
-    top: Math.max(0, face.y - (height * FACE_KEEP_OUT_TOP_PADDING_RATIO)),
-    right: Math.min(photoW, face.x + width + (width * FACE_KEEP_OUT_SIDE_PADDING_RATIO)),
-    bottom: Math.min(photoH, face.y + height + (height * FACE_KEEP_OUT_BOTTOM_PADDING_RATIO)),
+    left: Math.max(0, left - (w * FACE_KEEP_OUT_SIDE_PADDING_RATIO)),
+    top: Math.max(0, top - (h * FACE_KEEP_OUT_TOP_PADDING_RATIO)),
+    right: Math.min(photoW, right + (w * FACE_KEEP_OUT_SIDE_PADDING_RATIO)),
+    bottom: Math.min(photoH, bottom + (h * FACE_KEEP_OUT_BOTTOM_PADDING_RATIO)),
   }];
 }
 
@@ -145,11 +146,21 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-function buildTemplateCandidates(photoW, photoH, personBitmap, bounds, targetContentH, face) {
-  const mirroredFaceAnchor = face
-    ? mirrorAnchor((face.x + (face.width / 2)) / photoW)
-    : DEFAULT_ANCHOR_RATIO;
-  const baseAnchor = clamp(mirroredFaceAnchor, MIN_ANCHOR_RATIO, MAX_ANCHOR_RATIO);
+function subjectEdgeAnchor(photoW, subject) {
+  if (!subject) return DEFAULT_ANCHOR_RATIO;
+  if (subject.bbox) {
+    // Anchor at the near edge of the subject's body so the photobomber's
+    // content centre sits at the shoulder line — half visible, half behind.
+    const subjectIsRight = subject.centerX > photoW / 2;
+    return subjectIsRight
+      ? subject.bbox.left / photoW   // place Deadpool on the left side
+      : subject.bbox.right / photoW; // place Deadpool on the right side
+  }
+  return mirrorAnchor(subject.centerX / photoW);
+}
+
+function buildTemplateCandidates(photoW, photoH, personBitmap, bounds, targetContentH, subject) {
+  const baseAnchor = clamp(subjectEdgeAnchor(photoW, subject), MIN_ANCHOR_RATIO, MAX_ANCHOR_RATIO);
 
   return PLACEMENT_TEMPLATES.map((template) => ({
     placement: computePlacement(
@@ -214,18 +225,16 @@ function scorePlacement({
   );
 }
 
-function choosePlacement(photoW, photoH, personBitmap, bounds, targetContentH, face) {
-  const preferredAnchorRatio = face
-    ? 1 - ((face.x + (face.width / 2)) / photoW)
-    : DEFAULT_ANCHOR_RATIO;
-  const keepOutZones = buildFaceKeepOutZones(photoW, photoH, face);
+function choosePlacement(photoW, photoH, personBitmap, bounds, targetContentH, subject) {
+  const preferredAnchorRatio = clamp(subjectEdgeAnchor(photoW, subject), MIN_ANCHOR_RATIO, MAX_ANCHOR_RATIO);
+  const keepOutZones = buildKeepOutZones(photoW, photoH, subject);
   const candidates = buildTemplateCandidates(
     photoW,
     photoH,
     personBitmap,
     bounds,
     targetContentH,
-    face,
+    subject,
   );
 
   let bestPlacement = null;
@@ -257,18 +266,53 @@ function choosePlacement(photoW, photoH, personBitmap, bounds, targetContentH, f
   );
 }
 
-async function detectReferenceFaceInPhoto(photoImg) {
-  if (!isFaceDetectionEnabled()) return null;
+/**
+ * Detect the primary subject in the photo and return a unified descriptor.
+ * Tries pose detection first (gives full body bounds), falls back to face detection.
+ *
+ * @param {ImageBitmap} photoImg
+ * @returns {Promise<null|{centerX:number, bodyHeight:number, keepOut:{left,top,right,bottom}}>}
+ */
+async function detectSubject(photoImg) {
+  if (!isSmartPlacementEnabled()) return null;
 
+  // --- Pose detection (preferred) ---
+  try {
+    const { detectPrimaryPose } = await import('./pose-detection.js');
+    const pose = await detectPrimaryPose(photoImg);
+    if (pose) {
+      return {
+        centerX: pose.centerX,
+        bodyHeight: pose.bodyHeight,
+        bbox: pose.bbox,
+        // With depth compositing active, the photobomber can overlap the body —
+        // only the face needs to be kept clear.
+        keepOut: pose.headBox ?? pose.bbox,
+      };
+    }
+  } catch { /* fall through */ }
+
+  // --- Face detection fallback ---
   try {
     const { detectFaces } = await import('./face-detection.js');
     const faces = await detectFaces(photoImg);
-    if (!faces.length) return null;
+    if (faces.length) {
+      const face = faces.reduce((l, f) => (f.height > l.height ? f : l), faces[0]);
+      return {
+        centerX: face.x + face.width / 2,
+        bodyHeight: face.height * FACE_TO_BODY_RATIO,
+        keepOut: { left: face.x, top: face.y, right: face.x + face.width, bottom: face.y + face.height },
+      };
+    }
+  } catch { /* fall through */ }
 
-    return faces.reduce(
-      (largest, face) => (face.height > largest.height ? face : largest),
-      faces[0],
-    );
+  return null;
+}
+
+async function removeBgSafe(blob) {
+  try {
+    const { removeBg } = await import('./bg-removal.js');
+    return await removeBg(blob);
   } catch {
     return null;
   }
@@ -301,9 +345,16 @@ export async function augmentPhoto(capturedBlob, person, signal) {
 
   // Analyse person PNG to find where the actual content is
   const bounds = findContentBounds(personImg);
-  const referenceFace = await detectReferenceFaceInPhoto(photoImg);
-  const unclampedTargetContentH = referenceFace
-    ? referenceFace.height * FACE_TO_BODY_RATIO
+
+  // Detect subject pose/face and strip the photo background in parallel —
+  // both are independent and the bg removal is the slow step (~3–8 s on mobile).
+  const [subject, subjectCutoutBlob] = await Promise.all([
+    detectSubject(photoImg),
+    removeBgSafe(capturedBlob),
+  ]);
+
+  const unclampedTargetContentH = subject
+    ? subject.bodyHeight
     : photoImg.height * DEFAULT_CONTENT_HEIGHT_RATIO;
   const targetContentH = Math.max(
     photoImg.height * MIN_CONTENT_HEIGHT_RATIO,
@@ -315,10 +366,14 @@ export async function augmentPhoto(capturedBlob, person, signal) {
     personImg,
     bounds,
     targetContentH,
-    referenceFace,
+    subject,
   );
 
-  // Draw photo then composite person with a soft drop-shadow for depth
+  // Three-layer composite:
+  //   1. Full photo  — establishes the scene background
+  //   2. Photobomber — sits behind the subject with a drop shadow
+  //   3. Subject cutout (if bg removal succeeded) — re-drawn on top so the
+  //      photobomber appears to be standing behind the real person
   const canvas = new OffscreenCanvas(photoImg.width, photoImg.height);
   const ctx = canvas.getContext('2d');
   ctx.drawImage(photoImg, 0, 0);
@@ -330,6 +385,11 @@ export async function augmentPhoto(capturedBlob, person, signal) {
   ctx.shadowOffsetY = Math.round(photoImg.height * 0.003);
   ctx.drawImage(personImg, drawX, drawY, drawW, drawH);
   ctx.restore();
+
+  if (subjectCutoutBlob) {
+    const subjectImg = await createImageBitmap(subjectCutoutBlob);
+    ctx.drawImage(subjectImg, 0, 0, photoImg.width, photoImg.height);
+  }
 
   const jpegBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.92 });
 

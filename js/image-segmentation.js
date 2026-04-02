@@ -1,5 +1,8 @@
 // Lazy-loaded subject segmentation using MediaPipe Tasks Vision Image Segmenter.
 // Returns null on failure so callers can fall back to pose-only placement.
+//
+// DeepLabV3 uses Pascal VOC class labels: 0 = background, 15 = person.
+const PERSON_CLASS = 15;
 
 const TASKS_VISION_CDN =
   'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22';
@@ -73,7 +76,7 @@ function buildDensityGrid(mask, width, height, cols = 12, rows = 10) {
       for (let y = y0; y < y1; y += 1) {
         for (let x = x0; x < x1; x += 1) {
           total += 1;
-          if (mask[(y * width) + x] !== 0) foreground += 1;
+          if (mask[(y * width) + x] === PERSON_CLASS) foreground += 1;
         }
       }
 
@@ -120,6 +123,7 @@ export async function segmentForeground(imageBitmap) {
     const mask = categoryMask?.getAsUint8Array?.();
     const width = categoryMask?.width;
     const height = categoryMask?.height;
+    categoryMask?.close(); // free WASM heap allocation
     if (!mask || !width || !height) return null;
 
     return {
